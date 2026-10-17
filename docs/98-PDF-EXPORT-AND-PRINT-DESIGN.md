@@ -169,6 +169,67 @@ run within 0.01 pt of where layout put it, fonts embedded and subset under a
 six-character tag, no page delivered as a picture, repeat exports byte-identical, and a
 lost picture reported through the registry's compatibility report.
 
+### Font paths, and two readers that are not this crate (HF-294)
+
+The guards above read the file with the crate's own inspector. That is not enough for
+fonts: during HF-293 the inspector reported the registered Korean subset embedded and its
+text extracting while MuPDF drew the page **blank**, because a reader turns a CID into a
+glyph its own way. So font coverage is split by what can actually break, and each path is
+read back by Poppler and by MuPDF as well:
+
+| Case | Class | What it exercises |
+| --- | --- | --- |
+| `latin-bundled` | general | A bundled TrueType face, nothing registered |
+| `latin-named-ttf` | format | `registerFonts` with the browser's own variable Noto Serif (glyf subsetter) |
+| `korean-cff` | script | `registerFallbackFont` for `Hani`/`Hang`, CID-keyed CFF, charset rewrite |
+| `chinese-cff` | script | the `sc` bucket's `Hani`, CID-keyed CFF |
+| `japanese-cff` | script | the `jp` bucket's `Hani`/`Hira`/`Kana`, CID-keyed CFF |
+| `mixed-ttf-cff` | general | named TrueType and fallback CFF in one file |
+
+*General* is the font context and its lifetime: the export uses the session's shaper, and
+a second engine opening the same bytes has none of the first one's faces until it is given
+its own. *Format* is the embedding path a face's outline format takes. *Script* is the
+fallback registration that routes a script to its face. A pass on one class says nothing
+about another.
+
+- `crates/casual-doc-wasm/src/pdf_fonts_tests.rs`,
+  `every_font_path_reaches_the_pdf_and_a_second_engine_must_register_its_own`: each case on
+  the browser's shaper through `exportAs`, before registration (the control), after it,
+  and again on a second engine. The faces are embedded, no `.notdef` is reported, the text
+  layer is the document's, the page raster changes, and the second engine exports the same
+  bytes only once it is given the same faces. With `OPENDOC_PDF_READER_CORPUS` set it
+  writes the PDFs, the controls and the engine's own page-1 raster.
+- `scripts/pdf-readers/check.py` reads that corpus with Poppler (`pdftotext`, `pdffonts`,
+  `pdftoppm`) and MuPDF (PyMuPDF, hash-pinned): the text is the case's text, every font is
+  embedded, page 1 has ink, and its ink matches the engine's raster (F1 ≥ 0.75, one pixel
+  of tolerance). Where the control draws `.notdef`, the control must score at most 0.6
+  **and** 0.2 below the export, so the check proves on each case that it can tell ▯ from a
+  glyph. CI: `.github/workflows/ci.yml`, job `pdf-readers`; both readers are required.
+- `webapp/tests/document_font_lifecycle_wasm.test.mjs` drives the built `webapp/pkg` through
+  the real `font_provisioning.mjs`: for Korean, Japanese and Chinese, document B (same
+  bytes, same name, a new engine) ends with A's page pixels and A's PDF, and a face that
+  lands after its document was replaced reaches neither engine.
+
+Measured 2026-10-17 (Poppler 26.08, MuPDF 1.28.2, 96 dpi): every export scores 0.986–1.000
+in both readers; the `.notdef` controls 0.159–0.361; the Latin control (Liberation Serif
+substituted for the unregistered Noto Serif) 0.552–0.562.
+
+Mutations: the CID charset rewrite disabled → every Rust guard in `casual-doc-wasm` stays
+green, and MuPDF draws the Korean, Chinese and Japanese pages with **0 ink pixels** while
+their text still extracts (F1 0.000; the mixed page 0.328) — exactly HF-293, visible only to
+the reader check; the PDF exported on a fresh shaper → 4 of 5 `pdf_fonts_tests` red; the
+provisioning state made session-wide → the three wasm lifecycle tests red
+(`B draws no .notdef`, `missing_glyphs` 17, 17 and 6); a registration into a retired
+engine → `null pointer passed to rust`.
+
+Not covered, so not claimed: the production CJK faces (16 MB each; the subsets are cut from
+the same 2.004 masters — KR from the pinned file, JP from the system collection of the
+same version), Traditional Chinese and Hong Kong faces, vertical text, CFF2 and other
+variable CFF, Type 1, colour and bitmap glyphs, and the private-use Hancom glyphs. A
+variable TrueType face is drawn at its default instance on screen and in the PDF alike: a
+bold run in the registered Noto Serif draws Regular in both and reports nothing (FONT-05),
+so the matrix's Latin case is upright Regular on purpose.
+
 ## Problem
 
 The engine can render a document to screen (`DisplayList` → `casual-doc-render` CPU

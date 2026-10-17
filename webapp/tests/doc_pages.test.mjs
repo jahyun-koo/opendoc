@@ -551,14 +551,15 @@ test("how much English the reference pages put on the site, measured and publish
   // charset sentence and the new missing-glyph row of the support table, and the
   // remaining-work item on font parity rewritten from an open plan to what
   // shipped. Re-measure on the merged tree.
+  // HF-294: measured 2714 after regenerating the font-validation matrix section.
   const sites = Object.fromEntries(
     BUILT.map((page) => [page.file, scanMarkup(page.committed).length]),
   );
   const total = Object.values(sites).reduce((sum, count) => sum + count, 0);
   assert.equal(
     total,
-    2684,
-    `the thirteen reference pages carry ${total} unrouted English strings (was 2684). That ` +
+    2714,
+    `the thirteen reference pages carry ${total} unrouted English strings (was 2714). That ` +
       `is not a failure — it is the number, and it moved: a published document gained or ` +
       `lost prose, or a page was published. Regenerate the pages, then MEASURE and record ` +
       `the new figure here — do not calculate it. Per page: ` +

@@ -8,6 +8,7 @@ assets: nothing here is served to a reader, bundled into the engine, or
 | --- | --- | --- |
 | `NotoSansCJK-TestSubset.otf` | SIL OFL 1.1 (`OFL-1.1-NotoSansCJK.txt`) | 8,652 |
 | `NotoSansCJKkr-TestSubset.otf` | SIL OFL 1.1 (`OFL-1.1-NotoSansCJK.txt`) | 4,892 |
+| `NotoSansCJKjp-TestSubset.otf` | SIL OFL 1.1 (`OFL-1.1-NotoSansCJK.txt`) | 8,588 |
 
 ## `NotoSansCJK-TestSubset.otf`
 
@@ -114,3 +115,38 @@ sha256sum NotoSansCJKkr-Regular.otf   # 6bcb2a07…af7e992a
 OPENDOC_NOTO_CJK_KR=$PWD/NotoSansCJKkr-Regular.otf \
   cargo test -p casual-doc-pdf --test registered_fonts -- --ignored
 ```
+
+## `NotoSansCJKjp-TestSubset.otf`
+
+A 17-character subset of **Noto Sans CJK JP**, for the browser's `jp` bucket
+(`Hani`, `Hira`, `Kana`). Covered: the hand-written sentence
+"日本語の文書をエクスポートする試験" ("a test of exporting a Japanese document"),
+chosen for this test and not taken from any document — Han, Hiragana and
+Katakana in one line, so one paragraph shapes as three script runs.
+
+Used by `crates/casual-doc-wasm/src/pdf_fonts_tests.rs` (the font matrix, and
+the corpus `scripts/pdf-readers/check.py` reads with Poppler and MuPDF) and
+`webapp/tests/document_font_lifecycle_wasm.test.mjs` (`109` HF-294). Like the KR
+subset it keeps its source CIDs (glyph 1 is CID 1484), so it exercises the PDF
+writer's charset rewrite too.
+
+Its source is NOT the pinned production file: it is face 0 of the Noto Sans
+CJK collection `NotoSansCJK-Regular.ttc` as Arch Linux packages it
+(`noto-fonts-cjk` 20240730-1, SHA-256
+`b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a`), whose
+`name` ID 5 is `Version 2.004` — the same release as the pinned
+`NotoSansCJKjp-Regular.otf`. Regenerating (deterministic: two runs produce
+SHA-256 `27b5ea7730af6e08184a79c7d06d2e46d38924980b5bb80371193da69cde8a78`
+with fontTools 4.65.0):
+
+```sh
+python3 -m fontTools.subset NotoSansCJK-Regular.ttc --font-number=0 \
+  --text="日本語の文書をエクスポートする試験" \
+  --output-file=NotoSansCJKjp-TestSubset.otf \
+  --no-hinting --desubroutinize --drop-tables+=DSIG \
+  --name-IDs='*' --notdef-outline --notdef-glyph
+```
+
+The Latin case of the same matrix uses no fixture from here: it registers the
+browser's own `webapp/assets/fonts/script/NotoSerif-Variable.ttf`, the committed
+production face, so that case tests exactly what a reader's browser registers.

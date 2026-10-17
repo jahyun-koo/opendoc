@@ -5,6 +5,16 @@ on:
   push:
     branches:
       - main
+      # Validation without a pull request: a contributor (or a fork) pushes a
+      # `validate/<topic>` branch and gets the full suite on it. Narrow on
+      # purpose — an arbitrary feature-branch push does not run CI twice beside
+      # its pull request. Same read-only token and no secrets, as every trigger
+      # here.
+      - "validate/**"
+  # Run on any ref from the Actions tab or `gh workflow run ci.yml --ref <ref>`.
+  # GitHub only offers this once the trigger is on the DEFAULT branch, so a
+  # fork validating a branch before that uses the `validate/**` push above.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -231,14 +241,19 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
           fallback: none
-      - name: Build the webapp
-        run: ./webapp/build.sh
+      # Node BEFORE the build: `build.sh` runs five Node generators with
+      # `--check`, and `build-embed-docs.mjs` forks `npm pack --dry-run`. Set up
+      # after it, the build ran on the runner image's default Node and npm
+      # rather than the pinned major, so a `--check` could fail (or pass) for a
+      # runtime reason rather than real drift.
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: webapp/package-lock.json
+      - name: Build the webapp
+        run: ./webapp/build.sh
       - name: Install webapp Node dependencies
         run: npm ci --prefix webapp
       - name: Install Playwright Chromium
@@ -259,6 +274,62 @@ jobs:
         with:
           name: playwright-report-shard-${{ matrix.shard }}
           path: webapp/playwright-report/
+          retention-days: 7
+
+  # Two PDF readers that are not this repository read what the engine exports
+  # (`docs/109` HF-294, `docs/98` §font verification). The engine's own
+  # inspector reported a subset Korean face as embedded and its text as
+  # extracting while MuPDF drew the page BLANK (HF-293): only a reader's own
+  # raster shows that. A Rust test writes a synthetic corpus — Latin in a
+  # bundled and in a registered variable TrueType face, Korean, Chinese and
+  # Japanese in CID-keyed CFF subsets, and TrueType beside CFF in one file, each
+  # with a control exported before the faces were registered — and
+  # `scripts/pdf-readers/check.py` holds Poppler's and MuPDF's text, fonts and
+  # page-1 ink to it. Both readers are required: a missing one fails the job
+  # rather than quietly checking half.
+  pdf-readers:
+    name: pdf-readers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.96.0
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install Poppler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+      # PyMuPDF bundles MuPDF. Pinned by hash, binary only, no dependencies.
+      # A test-time reader: AGPL-3.0, never linked into or shipped with the
+      # engine, and outside the Cargo graph `dependency-policy` governs.
+      - name: Install MuPDF (PyMuPDF)
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/pdf-readers"
+          "${RUNNER_TEMP}/pdf-readers/bin/pip" install --no-deps --only-binary=:all: \
+            --require-hashes -r scripts/pdf-readers/requirements.txt
+      - name: Write the PDF font corpus
+        env:
+          OPENDOC_PDF_READER_CORPUS: ${{ runner.temp }}/pdf-corpus
+        run: >-
+          cargo test -p casual-doc-wasm --all-features --locked --lib --
+          --exact pdf_fonts_tests::every_font_path_reaches_the_pdf_and_a_second_engine_must_register_its_own
+      - name: Read the corpus with Poppler and MuPDF
+        run: |
+          pdftotext -v
+          "${RUNNER_TEMP}/pdf-readers/bin/python" -I scripts/pdf-readers/check.py \
+            "${RUNNER_TEMP}/pdf-corpus" --require poppler,mupdf \
+            --report "${RUNNER_TEMP}/pdf-corpus/report.json"
+      - name: Upload the corpus and the readers' measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pdf-readers-corpus
+          path: ${{ runner.temp }}/pdf-corpus/
           retention-days: 7
 
   platform:

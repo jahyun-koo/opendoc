@@ -353,6 +353,60 @@
         <h3 class="doc-h3" id="guards-and-the-mutations-that-drive-them-red">Guards, and the mutations that drive them red</h3>
         <p class="doc-body">Each guard was driven red by mutating the production code before it was trusted (<code>SKILL.md</code> §4). The mutations used: dropping <code>/ToUnicode</code> from the font dictionary; shifting the text matrix by 10 pt; forcing whole-face embedding; skipping glyph emission entirely; deriving the file <code>/ID</code> from a counter; ignoring <code>OS/2.fsType</code>; dropping the placeholder mark; disabling picture de-duplication; dropping <code>/Title</code>; skipping the composite-glyph closure; claiming <code>can_import</code>; downgrading a degraded finding to <code>Mapped</code>; and — for the exact-<code>ToUnicode</code> guards — restoring the <code>cmap</code>-inversion-only map, and separately dropping the <code>GlyphRun::node</code> anchor the shaper populates. Both turn <code>&quot;Rich document-properties fixture body.&quot;</code> back into <code>&quot;…ﬁxture…&quot;</code> and <code>&quot;often afflicted by fjords&quot;</code> back into <code>&quot;oen aﬄicted by ords&quot;</code>, which is what the reader saw before the fix. Those two guards also assert the bundled face <strong>really substitutes</strong> — fewer glyphs than characters, and at least one drawn glyph genuinely outside the face's <code>cmap</code> — because without that the assertions would hold whether or not it did.</p>
         <p class="doc-body">The guards assert the guarantee rather than the mechanism: the file is parsed back and interrogated the way a reader would — text extractable and matching the document, every run within 0.01 pt of where layout put it, fonts embedded and subset under a six-character tag, no page delivered as a picture, repeat exports byte-identical, and a lost picture reported through the registry's compatibility report.</p>
+        <h3 class="doc-h3" id="font-paths-and-two-readers-that-are-not-this-crate-hf-294">Font paths, and two readers that are not this crate (HF-294)</h3>
+        <p class="doc-body">The guards above read the file with the crate's own inspector. That is not enough for fonts: during HF-293 the inspector reported the registered Korean subset embedded and its text extracting while MuPDF drew the page <strong>blank</strong>, because a reader turns a CID into a glyph its own way. So font coverage is split by what can actually break, and each path is read back by Poppler and by MuPDF as well:</p>
+        <div class="doc-table-scroll">
+        <table class="doc-table">
+        <thead>
+        <tr>
+        <th>Case</th>
+        <th>Class</th>
+        <th>What it exercises</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td><code>latin-bundled</code></td>
+        <td>general</td>
+        <td>A bundled TrueType face, nothing registered</td>
+        </tr>
+        <tr>
+        <td><code>latin-named-ttf</code></td>
+        <td>format</td>
+        <td><code>registerFonts</code> with the browser's own variable Noto Serif (glyf subsetter)</td>
+        </tr>
+        <tr>
+        <td><code>korean-cff</code></td>
+        <td>script</td>
+        <td><code>registerFallbackFont</code> for <code>Hani</code>/<code>Hang</code>, CID-keyed CFF, charset rewrite</td>
+        </tr>
+        <tr>
+        <td><code>chinese-cff</code></td>
+        <td>script</td>
+        <td>the <code>sc</code> bucket's <code>Hani</code>, CID-keyed CFF</td>
+        </tr>
+        <tr>
+        <td><code>japanese-cff</code></td>
+        <td>script</td>
+        <td>the <code>jp</code> bucket's <code>Hani</code>/<code>Hira</code>/<code>Kana</code>, CID-keyed CFF</td>
+        </tr>
+        <tr>
+        <td><code>mixed-ttf-cff</code></td>
+        <td>general</td>
+        <td>named TrueType and fallback CFF in one file</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <p class="doc-body"><em>General</em> is the font context and its lifetime: the export uses the session's shaper, and a second engine opening the same bytes has none of the first one's faces until it is given its own. <em>Format</em> is the embedding path a face's outline format takes. <em>Script</em> is the fallback registration that routes a script to its face. A pass on one class says nothing about another.</p>
+        <ul class="doc-list">
+        <li><code>crates/casual-doc-wasm/src/pdf_fonts_tests.rs</code>, <code>every_font_path_reaches_the_pdf_and_a_second_engine_must_register_its_own</code>: each case on the browser's shaper through <code>exportAs</code>, before registration (the control), after it, and again on a second engine. The faces are embedded, no <code>.notdef</code> is reported, the text layer is the document's, the page raster changes, and the second engine exports the same bytes only once it is given the same faces. With <code>OPENDOC_PDF_READER_CORPUS</code> set it writes the PDFs, the controls and the engine's own page-1 raster.</li>
+        <li><code>scripts/pdf-readers/check.py</code> reads that corpus with Poppler (<code>pdftotext</code>, <code>pdffonts</code>, <code>pdftoppm</code>) and MuPDF (PyMuPDF, hash-pinned): the text is the case's text, every font is embedded, page 1 has ink, and its ink matches the engine's raster (F1 ≥ 0.75, one pixel of tolerance). Where the control draws <code>.notdef</code>, the control must score at most 0.6 <strong>and</strong> 0.2 below the export, so the check proves on each case that it can tell ▯ from a glyph. CI: <code>.github/workflows/ci.yml</code>, job <code>pdf-readers</code>; both readers are required.</li>
+        <li><code>webapp/tests/document_font_lifecycle_wasm.test.mjs</code> drives the built <code>webapp/pkg</code> through the real <code>font_provisioning.mjs</code>: for Korean, Japanese and Chinese, document B (same bytes, same name, a new engine) ends with A's page pixels and A's PDF, and a face that lands after its document was replaced reaches neither engine.</li>
+        </ul>
+        <p class="doc-body">Measured 2026-10-17 (Poppler 26.08, MuPDF 1.28.2, 96 dpi): every export scores 0.986–1.000 in both readers; the <code>.notdef</code> controls 0.159–0.361; the Latin control (Liberation Serif substituted for the unregistered Noto Serif) 0.552–0.562.</p>
+        <p class="doc-body">Mutations: the CID charset rewrite disabled → every Rust guard in <code>casual-doc-wasm</code> stays green, and MuPDF draws the Korean, Chinese and Japanese pages with <strong>0 ink pixels</strong> while their text still extracts (F1 0.000; the mixed page 0.328) — exactly HF-293, visible only to the reader check; the PDF exported on a fresh shaper → 4 of 5 <code>pdf_fonts_tests</code> red; the provisioning state made session-wide → the three wasm lifecycle tests red (<code>B draws no .notdef</code>, <code>missing_glyphs</code> 17, 17 and 6); a registration into a retired engine → <code>null pointer passed to rust</code>.</p>
+        <p class="doc-body">Not covered, so not claimed: the production CJK faces (16 MB each; the subsets are cut from the same 2.004 masters — KR from the pinned file, JP from the system collection of the same version), Traditional Chinese and Hong Kong faces, vertical text, CFF2 and other variable CFF, Type 1, colour and bitmap glyphs, and the private-use Hancom glyphs. A variable TrueType face is drawn at its default instance on screen and in the PDF alike: a bold run in the registered Noto Serif draws Regular in both and reports nothing (FONT-05), so the matrix's Latin case is upright Regular on purpose.</p>
         <h2 class="doc-h2" id="problem">Problem</h2>
         <p class="doc-body">The engine can render a document to screen (<code>DisplayList</code> → <code>casual-doc-render</code> CPU raster) and paginate it against a LibreOffice oracle, but it cannot produce a <strong>PDF</strong>. The support matrix (<code>18-SUPPORT-MATRIX.md</code>) lists <em>&quot;PDF render/export — Backend decision pending&quot;</em>, the architecture doc names <em>&quot;Headless raster/PDF&quot;</em> as the third paint target, and the ADR register lists <em>&quot;PDF generation backend&quot;</em> as a pending decision. This document specifies that backend end to end.</p>
         <p class="doc-body">Two hard requirements shape the whole design:</p>

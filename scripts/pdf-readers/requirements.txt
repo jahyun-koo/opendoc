@@ -1,0 +1,5 @@
+# MuPDF for `check.py`, as PyMuPDF (bundles MuPDF 1.28). The CI job
+# (`.github/workflows/ci.yml`, `pdf-readers`) runs on ubuntu-24.04 x86_64, and
+# this is the only glibc x86_64 abi3 wheel PyPI publishes for this version.
+pymupdf==1.28.2 \
+    --hash=sha256:397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f

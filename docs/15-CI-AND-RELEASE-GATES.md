@@ -4,7 +4,7 @@
 **CI provider:** GitHub Actions
 **Development toolchain:** Rust 1.96.0
 **MSRV:** Rust 1.88.0
-**Last updated:** 2026-09-28
+**Last updated:** 2026-10-17
 
 ## Purpose
 
@@ -39,7 +39,18 @@ Every pull request and push to `main` runs required checks with stable job names
 - `wasm`;
 - `platform`;
 - `dependency-policy`;
-- `repository-policy`.
+- `repository-policy`;
+- `pdf-readers` — Poppler and MuPDF (PyMuPDF, hash-pinned) read a synthetic
+  PDF font corpus the engine writes (Latin TrueType, Korean/Chinese/Japanese
+  CID CFF, each with a pre-registration control) and fail on text that does not
+  extract, an unembedded font, a blank page or ▯ (`docs/98`, `docs/109` HF-294).
+
+The same workflow also runs without a pull request: on a push to a
+`validate/**` branch, and by `workflow_dispatch` once that trigger is on the
+default branch. Both keep the read-only token and use no secrets. Every job that
+runs `webapp/build.sh` installs the pinned Node major first, because the build
+runs Node generators with `--check` and forks `npm pack`;
+`webapp/tests/deployment_contract.test.mjs` holds both workflows to that order.
 
 Scheduled CI adds dependency advisories and a bounded seeded DOCX package fuzz
 campaign. Pull-request CI builds the format-neutral ZIP, DOCX, and ODT package

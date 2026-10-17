@@ -69,6 +69,15 @@ jobs:
         with:
           tool: wasm-pack
 
+      # The Node major `ci.yml` pins, before the build: `build.sh` runs five
+      # Node generators with `--check` and one of them forks `npm pack`, so on
+      # the image's default Node the deployed pages could differ from the ones
+      # CI checked.
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
       - name: Build the site and WASM editor
         run: ./webapp/build.sh
 

@@ -1129,3 +1129,76 @@ test("no workflow cancels an in-flight run on main", () => {
       offenders.join("\n  "),
   );
 });
+
+/** The `jobs:` of a workflow, as `{ name: text }`. Workflows here indent jobs by
+ *  two spaces and their keys by four, which is all this needs. */
+function workflowJobs(text) {
+  const body = text.slice(text.search(/^jobs:\s*$/m));
+  const jobs = {};
+  const starts = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):\s*$/gm)];
+  for (const [index, match] of starts.entries()) {
+    const end = index + 1 < starts.length ? starts[index + 1].index : body.length;
+    jobs[match[1]] = body.slice(match.index, end);
+  }
+  return jobs;
+}
+
+test("every job that runs webapp/build.sh installs the pinned Node major before it", () => {
+  // `build.sh` runs five Node generators with `--check`, and `build-embed-docs.mjs`
+  // forks `npm pack`. `browser-smoke` installed Node AFTER the build and
+  // `pages.yml` never installed it, so both built on the runner image's default
+  // Node and npm: a `--check` failing for a runtime reason, or a deploy that is
+  // not the pages CI checked. `109` HF-294.
+  const node = CI.match(/node-version:\s*"(\d+)"/)[1];
+  const dir = join(REPO, ".github", "workflows");
+  const offenders = [];
+  let builds = 0;
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".yml"))) {
+    for (const [job, text] of Object.entries(workflowJobs(read(".github", "workflows", name)))) {
+      const build = text.search(/run:\s*\.\/webapp\/build\.sh/);
+      if (build < 0) continue;
+      builds += 1;
+      const setup = text.search(/uses:\s*actions\/setup-node@/);
+      const pinned = new RegExp(`node-version:\\s*"${node}"`).test(text);
+      if (setup < 0 || setup > build || !pinned) {
+        offenders.push(`${name} ${job}: setup-node ${setup < 0 ? "missing" : setup > build ? "after the build" : `not Node ${node}`}`);
+      }
+    }
+  }
+  assert.ok(builds >= 2, `expected ci.yml and pages.yml to build the webapp, found ${builds}`);
+  assert.deepEqual(offenders, [], `the webapp builds on an unpinned Node:\n  ${offenders.join("\n  ")}`);
+});
+
+test("the pdf-readers job is armed: it writes the corpus and both readers must read it", () => {
+  // SKILL §9.2: prose calling `pdf-readers` a CI gate names the workflow, and
+  // this holds the job to doing what that prose says (`109` HF-294). Each
+  // assertion is a way to disarm it quietly: drop the job, filter the Rust test
+  // to nothing (cargo then runs 0 tests and exits 0), or let a missing reader
+  // pass.
+  const job = workflowJobs(CI)["pdf-readers"];
+  assert.ok(job, "ci.yml has no pdf-readers job");
+  const test_ = job.match(/--exact\s+pdf_fonts_tests::(\w+)/);
+  assert.ok(test_, "pdf-readers must run the corpus test by exact name");
+  assert.match(
+    read("crates", "casual-doc-wasm", "src", "pdf_fonts_tests.rs"),
+    new RegExp(`fn ${test_[1]}\\(`),
+    `pdf-readers runs \`${test_[1]}\`, which no longer exists: cargo would run nothing`,
+  );
+  assert.match(job, /OPENDOC_PDF_READER_CORPUS:/, "the corpus test only writes files when told where");
+  assert.match(job, /scripts\/pdf-readers\/check\.py/);
+  assert.match(job, /--require poppler,mupdf/, "a missing reader must fail the job");
+  assert.match(job, /apt-get install[^\n]*poppler-utils/);
+  assert.match(job, /--require-hashes -r scripts\/pdf-readers\/requirements\.txt/);
+});
+
+test("CI can be run without a pull request, on the same read-only footing", () => {
+  // `109` HF-294: a branch, or a fork, is validated by pushing `validate/**` or by
+  // dispatching the workflow. Neither may widen what a run is trusted with.
+  const on = CI.slice(CI.search(/^on:\s*$/m), CI.search(/^permissions:\s*$/m));
+  assert.match(on, /^ {2}workflow_dispatch:/m);
+  assert.match(on, /^ {6}- "validate\/\*\*"$/m);
+  assert.doesNotMatch(on, /pull_request_target|workflow_run/, "a privileged trigger");
+  assert.doesNotMatch(on, /- "\*\*"|- '\*\*'|- \*$/m, "every branch push would run CI");
+  assert.match(CI, /^permissions:\n {2}contents: read\n\n/m, "top-level token stays read-only");
+  assert.doesNotMatch(CI, /secrets\./, "no job reads a secret");
+});

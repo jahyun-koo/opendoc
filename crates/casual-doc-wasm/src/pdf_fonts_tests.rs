@@ -185,3 +185,292 @@ fn exporting_leaves_the_session_and_a_repeat_export_unchanged() {
         "exporting did not change the page"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The font matrix (`docs/109` HF-294).
+//
+// The guards above are about Korean. What they proved — the export reads the
+// session's shaper — is GENERAL, but "Korean works" is not "fonts work": a
+// named TrueType face goes through the glyf subsetter, a CID-keyed CFF face
+// through the charset rewrite, and each script reaches its face through a
+// different fallback registration. One case per path, every one on the
+// browser's shaper and through `exportAs`:
+//
+// | case               | class    | path                                         |
+// | ------------------ | -------- | -------------------------------------------- |
+// | `latin-bundled`    | general  | bundled TrueType, nothing registered         |
+// | `latin-named-ttf`  | format   | `registerFonts`, variable TrueType (glyf)    |
+// | `korean-cff`       | script   | `registerFallbackFont`, CID CFF, `Hang`      |
+// | `chinese-cff`      | script   | `registerFallbackFont`, CID CFF, `Hani`      |
+// | `japanese-cff`     | script   | `registerFallbackFont`, CID CFF, `Hira/Kana` |
+// | `mixed-ttf-cff`    | general  | named TrueType and fallback CFF in one file  |
+//
+// Each case is exported before registration (the control), after it, and again
+// on a SECOND engine that opened the same bytes (the HF-292 lifecycle: a fresh
+// engine has none of the first one's faces and must be given its own). With
+// `OPENDOC_PDF_READER_CORPUS` naming a directory, the PDFs, the controls and
+// the engine's own raster of page 1 are written there for
+// `scripts/pdf-readers/check.py`, which reads them with Poppler and MuPDF —
+// two readers that are not this crate — and fails on blank pages, ▯ and text
+// that does not extract (`.github/workflows/ci.yml`, job `pdf-readers`).
+// ---------------------------------------------------------------------------
+
+/// Noto Sans CJK SC, subset to 19 scalars (`fixtures/fonts/README.md`).
+const CHINESE_FACE: &[u8] = include_bytes!("../../../fixtures/fonts/NotoSansCJK-TestSubset.otf");
+/// Noto Sans CJK JP, subset to [`JAPANESE`] (`fixtures/fonts/README.md`).
+const JAPANESE_FACE: &[u8] = include_bytes!("../../../fixtures/fonts/NotoSansCJKjp-TestSubset.otf");
+/// The browser's own named face for `Noto Serif` (`webapp/src/web_fonts.mjs`,
+/// `NAMED_WEB_FONT_FACES`): a variable TrueType the engine does not bundle.
+const LATIN_NAMED_FACE: &[u8] =
+    include_bytes!("../../../webapp/assets/fonts/script/NotoSerif-Variable.ttf");
+const CHINESE: &str = "中文 文字 中国";
+const JAPANESE: &str = "日本語の文書をエクスポートする試験";
+/// Plain Latin, with an `fi`/`ffl` pair so a ligature glyph has to map back to
+/// its letters in the text layer.
+const LATIN: &str = "Quick brown fox files waffle 0123";
+/// The engine's raster resolution for the corpus; the checker renders the PDF
+/// at the same value.
+const CORPUS_DPI: f32 = 96.0;
+
+#[derive(Clone, Copy)]
+enum Registration {
+    /// `registerFonts`: by family name, no coverage fallback.
+    Named(&'static [u8]),
+    /// `registerFallbackFont`: by script.
+    Fallback(&'static [u8], &'static [&'static str]),
+}
+
+struct Case {
+    id: &'static str,
+    class: &'static str,
+    text: String,
+    /// The family the run names, for both its Latin and East Asian text.
+    family: Option<&'static str>,
+    registrations: Vec<Registration>,
+    /// PostScript names the export must embed once registered.
+    faces: &'static [&'static str],
+    /// Whether the control (nothing registered) draws `.notdef`. A Latin face
+    /// that is missing is substituted, not ▯, so its control is the wrong face.
+    control_is_notdef: bool,
+}
+
+fn matrix() -> Vec<Case> {
+    let kr = Registration::Fallback(KOREAN_FACE, &["Hani", "Hang"]);
+    vec![
+        Case {
+            id: "latin-bundled",
+            class: "general",
+            text: LATIN.to_owned(),
+            family: None,
+            registrations: vec![],
+            faces: &[],
+            control_is_notdef: false,
+        },
+        Case {
+            id: "latin-named-ttf",
+            class: "format",
+            text: LATIN.to_owned(),
+            family: Some("Noto Serif"),
+            registrations: vec![Registration::Named(LATIN_NAMED_FACE)],
+            faces: &["NotoSerif-Regular"],
+            control_is_notdef: false,
+        },
+        Case {
+            id: "korean-cff",
+            class: "script",
+            text: KOREAN.to_owned(),
+            family: None,
+            registrations: vec![kr],
+            faces: &["NotoSansCJKkr-Regular"],
+            control_is_notdef: true,
+        },
+        Case {
+            id: "chinese-cff",
+            class: "script",
+            text: CHINESE.to_owned(),
+            family: None,
+            // The `sc` bucket's scripts.
+            registrations: vec![Registration::Fallback(CHINESE_FACE, &["Hani"])],
+            faces: &["NotoSansCJKsc-Regular"],
+            control_is_notdef: true,
+        },
+        Case {
+            id: "japanese-cff",
+            class: "script",
+            text: JAPANESE.to_owned(),
+            family: None,
+            // The `jp` bucket's scripts.
+            registrations: vec![Registration::Fallback(
+                JAPANESE_FACE,
+                &["Hani", "Hira", "Kana"],
+            )],
+            faces: &["NotoSansCJKjp-Regular"],
+            control_is_notdef: true,
+        },
+        Case {
+            id: "mixed-ttf-cff",
+            class: "general",
+            text: format!("Serif {KOREAN} PDF"),
+            family: Some("Noto Serif"),
+            registrations: vec![Registration::Named(LATIN_NAMED_FACE), kr],
+            faces: &["NotoSerif-Regular", "NotoSansCJKkr-Regular"],
+            control_is_notdef: true,
+        },
+    ]
+}
+
+fn register(doc: &mut WasmDocument, registration: Registration) {
+    match registration {
+        Registration::Named(bytes) => doc
+            .register_fonts_inner(bytes, &[u32::try_from(bytes.len()).unwrap()])
+            .expect("register the named face"),
+        Registration::Fallback(bytes, scripts) => doc.register_fallback_font(
+            bytes,
+            scripts.iter().map(|script| (*script).to_owned()).collect(),
+        ),
+    }
+}
+
+/// Page 1 as 8-bit grey composited on white, the shape a reader's raster has.
+fn grey_page(doc: &mut WasmDocument) -> (u32, u32, Vec<u8>) {
+    let page = doc.render_page_inner(0, CORPUS_DPI).expect("render");
+    let grey = page
+        .rgba
+        .chunks_exact(4)
+        .map(|px| {
+            let [r, g, b, a] = [px[0], px[1], px[2], px[3]].map(u32::from);
+            let luma = (299 * r + 587 * g + 114 * b) / 1000;
+            u8::try_from((luma * a + 255 * (255 - a)) / 255).unwrap()
+        })
+        .collect();
+    (page.width_px, page.height_px, grey)
+}
+
+/// The words of an export: no `.notdef` reported and the text layer intact.
+fn assert_clean(case: &Case, label: &str, export: &Exported) {
+    assert!(
+        !export.reports_missing_glyphs(),
+        "{}: {label} draws .notdef: {}",
+        case.id,
+        export.report
+    );
+    for face in case.faces {
+        assert!(
+            export.embeds(face),
+            "{}: {label} must embed {face}: {:?}",
+            case.id,
+            export.faces
+        );
+    }
+    // Compared without whitespace: the inspector joins each drawn run with a
+    // space, and Japanese is one run per script (Han, Hiragana, Katakana).
+    assert_eq!(
+        export.words().concat(),
+        case.text.split_whitespace().collect::<String>(),
+        "{}: {label}'s text layer",
+        case.id
+    );
+}
+
+#[test]
+fn every_font_path_reaches_the_pdf_and_a_second_engine_must_register_its_own() {
+    let corpus = std::env::var_os("OPENDOC_PDF_READER_CORPUS").map(std::path::PathBuf::from);
+    if let Some(dir) = &corpus {
+        std::fs::create_dir_all(dir).expect("create the corpus directory");
+    }
+    let mut manifest = Vec::new();
+    for case in matrix() {
+        let bytes = docx(&case.text, case.family);
+
+        // A: the control first, then the faces.
+        let mut a = open_in_browser(&bytes);
+        let control_bytes = a.export_as_inner(PDF, "semantic").expect("export").bytes;
+        let control = export_pdf(&mut a);
+        let control_raster = grey_page(&mut a);
+        assert_eq!(
+            control.reports_missing_glyphs(),
+            case.control_is_notdef,
+            "{}: the control: {}",
+            case.id,
+            control.report
+        );
+        for face in case.faces {
+            assert!(
+                !control.embeds(face),
+                "{}: nothing registered, yet {face} is embedded",
+                case.id
+            );
+        }
+        for registration in &case.registrations {
+            register(&mut a, *registration);
+        }
+        let a_export = export_pdf(&mut a);
+        assert_clean(&case, "A", &a_export);
+        let a_bytes = a.export_as_inner(PDF, "semantic").expect("export").bytes;
+        let a_raster = grey_page(&mut a);
+        if !case.registrations.is_empty() {
+            assert!(
+                a_raster != control_raster,
+                "{}: registering changed nothing on the page, so the raster reference \
+                 cannot tell the face from its absence",
+                case.id
+            );
+        }
+
+        // B: a second engine on the same bytes starts with none of A's faces.
+        let mut b = open_in_browser(&bytes);
+        let b_before = b.export_as_inner(PDF, "semantic").expect("export").bytes;
+        assert!(
+            b_before == control_bytes,
+            "{}: A's registration leaked into B's export",
+            case.id
+        );
+        for registration in &case.registrations {
+            register(&mut b, *registration);
+        }
+        let b_bytes = b.export_as_inner(PDF, "semantic").expect("export").bytes;
+        assert!(
+            b_bytes == a_bytes,
+            "{}: B given the same faces must export the same file",
+            case.id
+        );
+        assert!(
+            grey_page(&mut b) == a_raster,
+            "{}: B's page is A's",
+            case.id
+        );
+
+        if let Some(dir) = &corpus {
+            let write = |name: String, data: &[u8]| {
+                std::fs::write(dir.join(name), data).expect("write the corpus");
+            };
+            let pgm = |(width, height, grey): &(u32, u32, Vec<u8>)| {
+                let mut out = format!("P5\n{width} {height}\n255\n").into_bytes();
+                out.extend_from_slice(grey);
+                out
+            };
+            write(format!("{}.pdf", case.id), &a_bytes);
+            write(format!("{}.control.pdf", case.id), &control_bytes);
+            write(format!("{}.engine.pgm", case.id), &pgm(&a_raster));
+            manifest.push(serde_json::json!({
+                "id": case.id,
+                "class": case.class,
+                "text": case.text,
+                "faces": case.faces,
+                "controlIsNotdef": case.control_is_notdef,
+                "registered": !case.registrations.is_empty(),
+                "pdf": format!("{}.pdf", case.id),
+                "control": format!("{}.control.pdf", case.id),
+                "engine": format!("{}.engine.pgm", case.id),
+            }));
+        }
+    }
+    if let Some(dir) = &corpus {
+        let manifest = serde_json::json!({ "dpi": CORPUS_DPI, "cases": manifest });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .expect("write the manifest");
+    }
+}
